@@ -43,24 +43,23 @@ jobs:
       attestations: write # needed to generate artifact attestations
     strategy:
       matrix:
+        # Trimmed to the assets kata-qemu-snp (amd64, CPU SNP) needs. Removed:
+        # cloud-hypervisor, firecracker (unused VMMs); kernel-debug,
+        # kernel-dragonball-experimental, kernel-nvidia-gpu (unused kernels; the
+        # GPU one is the slowest job — module signing); ovmf-tdx,
+        # qemu-tdx-experimental (TDX; we test SNP). The merge step globs whatever
+        # is present, so dropping these just omits unused runtime classes.
         asset:
           - agent
           - busybox
-          - cloud-hypervisor
           - coco-guest-components
-          - firecracker
           - kernel
-          - kernel-debug
-          - kernel-dragonball-experimental
-          - kernel-nvidia-gpu
           - nydus
           - ovmf
           - ovmf-sev
-          - ovmf-tdx
           - pause-image
           - qemu
           - qemu-snp-experimental
-          - qemu-tdx-experimental
           - virtiofsd
         stage:
           - ${{ inputs.stage }}
@@ -435,8 +434,10 @@ jobs:
   build-tools-asset:
     name: build-tools-asset
     # Fork build: the CLI tools tarball is not needed for the kata-deploy guest
-    # image (publish consumes kata-artifacts-*, not kata-tools-*). Don't let its
-    # failure block the publish step.
+    # image (publish consumes kata-artifacts-*, not kata-tools-*). Skip it
+    # entirely to free runners for the critical path; create-kata-tools-tarball
+    # then skips too (its only dependency is skipped).
+    if: false
     continue-on-error: true
     runs-on: ubuntu-22.04
     permissions:
