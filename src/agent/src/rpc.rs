@@ -2772,12 +2772,13 @@ async fn run_checked(program: &str, args: &[&str], input: Option<&[u8]>) -> Resu
     }
     let mut child = cmd.spawn().with_context(|| format!("spawn {}", program))?;
     if let Some(data) = input {
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow!("failed to open stdin for {}", program))?;
-        stdin.write_all(data).await?;
-        stdin.shutdown().await?;
+        if let Some(mut stdin) = child.stdin.take() {
+            // Ignore write/close errors here (e.g. broken pipe when the child
+            // exits early). Reporting that would mask the child's real failure,
+            // which we surface from stderr below.
+            let _ = stdin.write_all(data).await;
+            let _ = stdin.shutdown().await;
+        }
     }
     let output = child.wait_with_output().await?;
     if !output.status.success() {
@@ -2908,6 +2909,10 @@ async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
                 "cryptsetup",
                 &[
                     "luksFormat",
+                    // The guest init namespace may lack a writable cryptsetup
+                    // lock dir (/run/cryptsetup); disable locking so cryptsetup
+                    // does not exit early trying to acquire it.
+                    "--disable-locks",
                     "--type",
                     "luks2",
                     // pbkdf2 instead of the default argon2id: argon2id sizes
@@ -2931,7 +2936,7 @@ async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
         if !std::path::Path::new(&mapper_path).exists() {
             run_checked(
                 "cryptsetup",
-                &["luksOpen", &node, &mapper, "-"],
+                &["luksOpen", "--disable-locks", &node, &mapper, "-"],
                 Some(dek.as_slice()),
             )
             .await
