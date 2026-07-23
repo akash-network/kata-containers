@@ -313,7 +313,7 @@ impl AgentService {
         // volume with its per-lease KBS key and bind it into the container.
         cdh_handler_akash_secure_volumes(&mut oci)
             .await
-            .map_err(|e| anyhow!("failed to handle akash secure volumes: {}", e))?;
+            .map_err(|e| anyhow!("failed to handle akash secure volumes: {:#}", e))?;
 
         let mut s = self.sandbox.lock().await;
         s.container_mounts.insert(cid.clone(), m);
@@ -2863,7 +2863,21 @@ async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
             info!(sl(), "akash secure volume: formatting LUKS2"; "device" => vol.device.as_str());
             run_checked(
                 "cryptsetup",
-                &["luksFormat", "--type", "luks2", "--batch-mode", &node, "-"],
+                &[
+                    "luksFormat",
+                    "--type",
+                    "luks2",
+                    // Use pbkdf2 instead of the default argon2id: argon2id
+                    // benchmarks against available RAM and fails ("not enough
+                    // memory to open keyslot") inside a memory-constrained guest.
+                    "--pbkdf",
+                    "pbkdf2",
+                    "--pbkdf-force-iterations",
+                    "1000",
+                    "--batch-mode",
+                    &node,
+                    "-",
+                ],
                 Some(dek.as_slice()),
             )
             .await
