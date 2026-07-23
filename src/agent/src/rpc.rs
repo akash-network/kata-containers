@@ -2888,7 +2888,10 @@ async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
             .map_err(|e| anyhow!("fetch DEK {}: {}", vol.key_uri, e))?;
 
         let tag = vol.device.trim_start_matches('/').replace(['/', ':'], "_");
-        let node = format!("{}/dev_{}", AKASH_SECURE_STAGING_DIR, tag);
+        // The device node must live on devtmpfs (/dev): the staging dir is under
+        // /run, which is a nodev tmpfs, so a device node created there is inert
+        // ("does not exist or access denied" from cryptsetup).
+        let node = format!("/dev/aksec_{}", tag);
         let mapper = format!("akash_secure_{}", tag);
         let mapper_path = format!("/dev/mapper/{}", mapper);
         let staging = format!("{}/mnt_{}", AKASH_SECURE_STAGING_DIR, tag);
