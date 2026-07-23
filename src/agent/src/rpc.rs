@@ -309,6 +309,12 @@ impl AgentService {
             .await
             .map_err(|e| anyhow!("failed to handle sealed secrets: {}", e))?;
 
+        // Set up Akash confidential persistent storage: dm-crypt each block
+        // volume with its per-lease KBS key and bind it into the container.
+        cdh_handler_akash_secure_volumes(&mut oci)
+            .await
+            .map_err(|e| anyhow!("failed to handle akash secure volumes: {}", e))?;
+
         let mut s = self.sandbox.lock().await;
         s.container_mounts.insert(cid.clone(), m);
 
@@ -2695,6 +2701,209 @@ async fn cdh_handler_sealed_secrets(oci: &mut Spec) -> Result<()> {
                 );
             }
         }
+    }
+
+    Ok(())
+}
+
+// ---- Akash confidential persistent storage ----
+//
+// The provider marks each confidential persistent volume on the guest kernel
+// command line:
+//
+//     agent.akash_secure_volumes=<devicePath>=<mountPath>=<keyResourceURI>[,...]
+//
+// `devicePath` is the raw block device attached to the container (a Block-mode
+// PVC), `keyResourceURI` is a KBS resource holding the per-lease disk encryption
+// key (DEK), and `mountPath` is where the tenant expects the decrypted
+// filesystem. For each entry the agent fetches the DEK from KBS (attestation
+// gated, never seen by the host), dm-crypts the device with a stable on-device
+// LUKS2 header (format on first use, open thereafter), makes an ext4 filesystem
+// on first use, mounts it to a staging path, and adds an OCI bind mount so the
+// decrypted filesystem appears at the tenant's mount path inside the container.
+const AKASH_SECURE_VOLUMES_CMDLINE_KEY: &str = "agent.akash_secure_volumes";
+const AKASH_SECURE_STAGING_DIR: &str = "/run/akash-secure";
+
+struct AkashSecureVolume {
+    device: String,
+    mount: String,
+    key_uri: String,
+}
+
+fn parse_akash_secure_volumes(cmdline: &str) -> Vec<AkashSecureVolume> {
+    let prefix = format!("{}=", AKASH_SECURE_VOLUMES_CMDLINE_KEY);
+    for token in cmdline.split_whitespace() {
+        if let Some(val) = token.strip_prefix(&prefix) {
+            return val
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .filter_map(|spec| {
+                    let parts: Vec<&str> = spec.splitn(3, '=').collect();
+                    if parts.len() == 3 {
+                        Some(AkashSecureVolume {
+                            device: parts[0].to_string(),
+                            mount: parts[1].to_string(),
+                            key_uri: parts[2].to_string(),
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
+// run_checked runs a command to completion, optionally writing `input` to its
+// stdin (used to pass the LUKS passphrase without a temporary file), and returns
+// an error if it exits non-zero.
+async fn run_checked(program: &str, args: &[&str], input: Option<&[u8]>) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    // Keep the agent SIGCHLD handler from reaping this child before
+    // tokio::process observes it (mirrors block_handler's mkfs invocation).
+    let _locker = rustjail::container::WAIT_PID_LOCKER.lock().await;
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if input.is_some() {
+        cmd.stdin(std::process::Stdio::piped());
+    }
+    let mut child = cmd.spawn().with_context(|| format!("spawn {}", program))?;
+    if let Some(data) = input {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow!("failed to open stdin for {}", program))?;
+        stdin.write_all(data).await?;
+        stdin.shutdown().await?;
+    }
+    let output = child.wait_with_output().await?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "{} {:?} failed: status={}, stderr={}",
+            program,
+            args,
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+async fn cmd_succeeds(program: &str, args: &[&str]) -> bool {
+    let _locker = rustjail::container::WAIT_PID_LOCKER.lock().await;
+    matches!(
+        tokio::process::Command::new(program).args(args).output().await,
+        Ok(o) if o.status.success()
+    )
+}
+
+fn make_block_node(path: &str, major: i64, minor: i64) -> Result<()> {
+    let _ = std::fs::remove_file(path);
+    nix::sys::stat::mknod(
+        path,
+        nix::sys::stat::SFlag::S_IFBLK,
+        nix::sys::stat::Mode::from_bits_truncate(0o600),
+        nix::sys::stat::makedev(major as u64, minor as u64),
+    )
+    .map_err(|e| anyhow!("mknod {} ({}:{}): {}", path, major, minor, e))?;
+    Ok(())
+}
+
+async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
+    if !confidential_data_hub::is_cdh_client_initialized() {
+        return Ok(());
+    }
+
+    let cmdline = tokio::fs::read_to_string("/proc/cmdline")
+        .await
+        .unwrap_or_default();
+    let volumes = parse_akash_secure_volumes(&cmdline);
+    if volumes.is_empty() {
+        return Ok(());
+    }
+
+    let _ = tokio::fs::create_dir_all(AKASH_SECURE_STAGING_DIR).await;
+
+    for vol in volumes {
+        // Resolve the container device path to its guest major:minor.
+        let (major, minor) = {
+            let linux = oci
+                .linux()
+                .as_ref()
+                .ok_or_else(|| anyhow!("spec has no linux section"))?;
+            let devices = linux
+                .devices()
+                .as_ref()
+                .ok_or_else(|| anyhow!("spec has no linux devices"))?;
+            let dev = devices
+                .iter()
+                .find(|d| d.path().as_path().to_str() == Some(vol.device.as_str()))
+                .ok_or_else(|| anyhow!("secure volume device {} not found in spec", vol.device))?;
+            (dev.major(), dev.minor())
+        };
+
+        // Fetch the per-lease DEK from KBS (attestation gated; host never sees it).
+        let dek = confidential_data_hub::get_cdh_resource(&vol.key_uri)
+            .await
+            .map_err(|e| anyhow!("fetch DEK {}: {}", vol.key_uri, e))?;
+
+        let tag = vol.device.trim_start_matches('/').replace(['/', ':'], "_");
+        let node = format!("{}/dev_{}", AKASH_SECURE_STAGING_DIR, tag);
+        let mapper = format!("akash_secure_{}", tag);
+        let mapper_path = format!("/dev/mapper/{}", mapper);
+        let staging = format!("{}/mnt_{}", AKASH_SECURE_STAGING_DIR, tag);
+
+        make_block_node(&node, major, minor)?;
+
+        // Format on first use (no LUKS header yet), otherwise just open. An
+        // on-device header keeps the volume reopenable across restarts.
+        if !cmd_succeeds("cryptsetup", &["isLuks", &node]).await {
+            info!(sl(), "akash secure volume: formatting LUKS2"; "device" => vol.device.as_str());
+            run_checked(
+                "cryptsetup",
+                &["luksFormat", "--type", "luks2", "--batch-mode", &node, "-"],
+                Some(dek.as_slice()),
+            )
+            .await
+            .context("cryptsetup luksFormat")?;
+        }
+        run_checked(
+            "cryptsetup",
+            &["luksOpen", &node, &mapper, "-"],
+            Some(dek.as_slice()),
+        )
+        .await
+        .context("cryptsetup luksOpen")?;
+
+        // Make a filesystem on first use.
+        if !cmd_succeeds("blkid", &[mapper_path.as_str()]).await {
+            info!(sl(), "akash secure volume: creating ext4"; "device" => vol.device.as_str());
+            run_checked("mkfs.ext4", &["-F", &mapper_path], None)
+                .await
+                .context("mkfs.ext4")?;
+        }
+
+        let _ = tokio::fs::create_dir_all(&staging).await;
+        run_checked("mount", &[&mapper_path, &staging], None)
+            .await
+            .context("mount decrypted device")?;
+
+        // Bind the decrypted filesystem into the container at the tenant path.
+        let mut m = oci::Mount::default();
+        m.set_source(Some(std::path::PathBuf::from(&staging)));
+        m.set_typ(Some("bind".to_string()));
+        m.set_destination(std::path::PathBuf::from(&vol.mount));
+        m.set_options(Some(vec!["rbind".to_string(), "rprivate".to_string()]));
+        match oci.mounts_mut().as_mut() {
+            Some(mounts) => mounts.push(m),
+            None => return Err(anyhow!("spec has no mounts to attach secure volume")),
+        }
+
+        info!(sl(), "akash secure volume ready";
+            "device" => vol.device.as_str(), "mount" => vol.mount.as_str());
     }
 
     Ok(())
