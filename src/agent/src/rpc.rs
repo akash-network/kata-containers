@@ -2812,6 +2812,25 @@ fn make_block_node(path: &str, major: i64, minor: i64) -> Result<()> {
     Ok(())
 }
 
+// ensure_dm_control makes sure the device-mapper control node exists so that
+// cryptsetup luksOpen can initialize device-mapper in a minimal guest /dev that
+// has no udev. The control node is the misc char device 10:236.
+fn ensure_dm_control() -> Result<()> {
+    let ctrl = "/dev/mapper/control";
+    if std::path::Path::new(ctrl).exists() {
+        return Ok(());
+    }
+    let _ = std::fs::create_dir_all("/dev/mapper");
+    nix::sys::stat::mknod(
+        ctrl,
+        nix::sys::stat::SFlag::S_IFCHR,
+        nix::sys::stat::Mode::from_bits_truncate(0o600),
+        nix::sys::stat::makedev(10, 236),
+    )
+    .map_err(|e| anyhow!("mknod {}: {}", ctrl, e))?;
+    Ok(())
+}
+
 async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
     if !confidential_data_hub::is_cdh_client_initialized() {
         return Ok(());
@@ -2873,11 +2892,17 @@ async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
         let mapper_path = format!("/dev/mapper/{}", mapper);
         let staging = format!("{}/mnt_{}", AKASH_SECURE_STAGING_DIR, tag);
 
+        // cryptsetup luksOpen needs the device-mapper control node; create it if
+        // the minimal guest /dev lacks it (char device 10:236).
+        ensure_dm_control()?;
         make_block_node(&node, major, minor)?;
 
-        // Format on first use (no LUKS header yet), otherwise just open. An
-        // on-device header keeps the volume reopenable across restarts.
-        if !cmd_succeeds("cryptsetup", &["isLuks", &node]).await {
+        // A fresh (never-formatted) device needs both a LUKS header and a new
+        // filesystem; an existing LUKS device already has both. Tying mkfs to the
+        // "fresh" decision (rather than blkid) avoids reformatting a populated
+        // volume across restart (data loss) and drops the blkid dependency.
+        let fresh = !cmd_succeeds("cryptsetup", &["isLuks", &node]).await;
+        if fresh {
             info!(sl(), "akash secure volume: formatting LUKS2"; "device" => vol.device.as_str());
             run_checked(
                 "cryptsetup",
@@ -2885,9 +2910,9 @@ async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
                     "luksFormat",
                     "--type",
                     "luks2",
-                    // Use pbkdf2 instead of the default argon2id: argon2id
-                    // benchmarks against available RAM and fails ("not enough
-                    // memory to open keyslot") inside a memory-constrained guest.
+                    // pbkdf2 instead of the default argon2id: argon2id sizes
+                    // itself to available RAM and fails ("not enough memory to
+                    // open keyslot") inside a memory-constrained guest.
                     "--pbkdf",
                     "pbkdf2",
                     "--pbkdf-force-iterations",
@@ -2901,6 +2926,7 @@ async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
             .await
             .context("cryptsetup luksFormat")?;
         }
+
         // Open the mapper unless a prior (retried) create already opened it.
         if !std::path::Path::new(&mapper_path).exists() {
             run_checked(
@@ -2912,8 +2938,7 @@ async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
             .context("cryptsetup luksOpen")?;
         }
 
-        // Make a filesystem on first use.
-        if !cmd_succeeds("blkid", &[mapper_path.as_str()]).await {
+        if fresh {
             info!(sl(), "akash secure volume: creating ext4"; "device" => vol.device.as_str());
             run_checked("mkfs.ext4", &["-F", &mapper_path], None)
                 .await
@@ -2926,9 +2951,16 @@ async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
             .map(|m| m.lines().any(|l| l.split(' ').nth(1) == Some(staging.as_str())))
             .unwrap_or(false);
         if !already_mounted {
-            run_checked("mount", &[&mapper_path, &staging], None)
-                .await
-                .context("mount decrypted device")?;
+            // Mount via the syscall (nix) rather than the `mount` binary to avoid
+            // a PATH/tooling dependency inside the guest.
+            nix::mount::mount(
+                Some(mapper_path.as_str()),
+                staging.as_str(),
+                Some("ext4"),
+                nix::mount::MsFlags::empty(),
+                None::<&str>,
+            )
+            .context("mount decrypted device")?;
         }
 
         // Bind the decrypted filesystem into the container at the tenant path.
