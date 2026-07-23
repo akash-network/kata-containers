@@ -43,23 +43,24 @@ jobs:
       attestations: write # needed to generate artifact attestations
     strategy:
       matrix:
-        # Trimmed to the assets kata-qemu-snp (amd64, CPU SNP) needs. Removed:
-        # cloud-hypervisor, firecracker (unused VMMs); kernel-debug,
-        # kernel-dragonball-experimental, kernel-nvidia-gpu (unused kernels; the
-        # GPU one is the slowest job — module signing); ovmf-tdx,
-        # qemu-tdx-experimental (TDX; we test SNP). The merge step globs whatever
-        # is present, so dropping these just omits unused runtime classes.
         asset:
           - agent
           - busybox
+          - cloud-hypervisor
           - coco-guest-components
+          - firecracker
           - kernel
+          - kernel-debug
+          - kernel-dragonball-experimental
+          - kernel-nvidia-gpu
           - nydus
           - ovmf
           - ovmf-sev
+          - ovmf-tdx
           - pause-image
           - qemu
           - qemu-snp-experimental
+          - qemu-tdx-experimental
           - virtiofsd
         stage:
           - ${{ inputs.stage }}
@@ -205,13 +206,15 @@ jobs:
       packages: write # needed to push build artifacts to ghcr.io
     strategy:
       matrix:
-        # Trimmed to match the build-asset trim: the nvidia-gpu rootfs variants
-        # require the kernel-nvidia-gpu modules (removed), and Mariner is unused.
-        # kata-qemu-snp uses the confidential rootfs.
         asset:
           - rootfs-image
           - rootfs-image-confidential
           - rootfs-image-coco-extension
+          - rootfs-image-mariner
+          - rootfs-image-nvidia-gpu
+          - rootfs-image-nvidia-gpu-confidential
+          - rootfs-image-nvidia
+          - rootfs-image-nvidia-gpu-extension
           - rootfs-initrd
           - rootfs-initrd-confidential
     concurrency:
@@ -282,6 +285,7 @@ jobs:
         asset:
           - busybox
           - coco-guest-components
+          - kernel-nvidia-gpu-modules
           - pause-image
     concurrency:
       group: ${{ github.workflow }}-${{ github.job }}-${{ github.event.pull_request.number || github.ref }}-amd64-${{ toJSON(matrix) }}
@@ -431,10 +435,8 @@ jobs:
   build-tools-asset:
     name: build-tools-asset
     # Fork build: the CLI tools tarball is not needed for the kata-deploy guest
-    # image (publish consumes kata-artifacts-*, not kata-tools-*). Skip it
-    # entirely to free runners for the critical path; create-kata-tools-tarball
-    # then skips too (its only dependency is skipped).
-    if: false
+    # image (publish consumes kata-artifacts-*, not kata-tools-*). Don't let its
+    # failure block the publish step.
     continue-on-error: true
     runs-on: ubuntu-22.04
     permissions:
