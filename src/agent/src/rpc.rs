@@ -2828,21 +2828,20 @@ async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
     let _ = tokio::fs::create_dir_all(AKASH_SECURE_STAGING_DIR).await;
 
     for vol in volumes {
-        // Resolve the container device path to its guest major:minor.
-        let (major, minor) = {
-            let linux = oci
-                .linux()
-                .as_ref()
-                .ok_or_else(|| anyhow!("spec has no linux section"))?;
-            let devices = linux
-                .devices()
-                .as_ref()
-                .ok_or_else(|| anyhow!("spec has no linux devices"))?;
-            let dev = devices
-                .iter()
-                .find(|d| d.path().as_path().to_str() == Some(vol.device.as_str()))
-                .ok_or_else(|| anyhow!("secure volume device {} not found in spec", vol.device))?;
-            (dev.major(), dev.minor())
+        // Only handle volumes whose block device is present in THIS container's
+        // spec. The pod sandbox/pause container and peer containers do not have
+        // the device, so skip them rather than failing container creation.
+        let dev = oci
+            .linux()
+            .as_ref()
+            .and_then(|l| l.devices().as_ref())
+            .and_then(|devs| {
+                devs.iter()
+                    .find(|d| d.path().as_path().to_str() == Some(vol.device.as_str()))
+            });
+        let (major, minor) = match dev {
+            Some(d) => (d.major(), d.minor()),
+            None => continue,
         };
 
         // Fetch the per-lease DEK from KBS (attestation gated; host never sees it).
@@ -2870,13 +2869,16 @@ async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
             .await
             .context("cryptsetup luksFormat")?;
         }
-        run_checked(
-            "cryptsetup",
-            &["luksOpen", &node, &mapper, "-"],
-            Some(dek.as_slice()),
-        )
-        .await
-        .context("cryptsetup luksOpen")?;
+        // Open the mapper unless a prior (retried) create already opened it.
+        if !std::path::Path::new(&mapper_path).exists() {
+            run_checked(
+                "cryptsetup",
+                &["luksOpen", &node, &mapper, "-"],
+                Some(dek.as_slice()),
+            )
+            .await
+            .context("cryptsetup luksOpen")?;
+        }
 
         // Make a filesystem on first use.
         if !cmd_succeeds("blkid", &[mapper_path.as_str()]).await {
@@ -2887,9 +2889,15 @@ async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
         }
 
         let _ = tokio::fs::create_dir_all(&staging).await;
-        run_checked("mount", &[&mapper_path, &staging], None)
+        let already_mounted = tokio::fs::read_to_string("/proc/mounts")
             .await
-            .context("mount decrypted device")?;
+            .map(|m| m.lines().any(|l| l.split(' ').nth(1) == Some(staging.as_str())))
+            .unwrap_or(false);
+        if !already_mounted {
+            run_checked("mount", &[&mapper_path, &staging], None)
+                .await
+                .context("mount decrypted device")?;
+        }
 
         // Bind the decrypted filesystem into the container at the tenant path.
         let mut m = oci::Mount::default();
