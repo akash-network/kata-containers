@@ -2844,6 +2844,24 @@ async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
             None => continue,
         };
 
+        // The block device is hot-plugged into the guest during container
+        // creation and may not be registered in the guest kernel yet at this
+        // point. Wait for it to appear before running cryptsetup against it.
+        let sysblk = format!("/sys/dev/block/{}:{}", major, minor);
+        let mut waited_ms = 0u64;
+        while !std::path::Path::new(&sysblk).exists() {
+            if waited_ms >= 20_000 {
+                return Err(anyhow!(
+                    "secure volume device {} ({}:{}) did not appear in the guest within 20s",
+                    vol.device,
+                    major,
+                    minor
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            waited_ms += 250;
+        }
+
         // Fetch the per-lease DEK from KBS (attestation gated; host never sees it).
         let dek = confidential_data_hub::get_cdh_resource(&vol.key_uri)
             .await
