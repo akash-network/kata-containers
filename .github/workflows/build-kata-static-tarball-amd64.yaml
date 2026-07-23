@@ -205,15 +205,13 @@ jobs:
       packages: write # needed to push build artifacts to ghcr.io
     strategy:
       matrix:
+        # Trimmed to match the build-asset trim: the nvidia-gpu rootfs variants
+        # require the kernel-nvidia-gpu modules (removed), and Mariner is unused.
+        # kata-qemu-snp uses the confidential rootfs.
         asset:
           - rootfs-image
           - rootfs-image-confidential
           - rootfs-image-coco-extension
-          - rootfs-image-mariner
-          - rootfs-image-nvidia-gpu
-          - rootfs-image-nvidia-gpu-confidential
-          - rootfs-image-nvidia
-          - rootfs-image-nvidia-gpu-extension
           - rootfs-initrd
           - rootfs-initrd-confidential
     concurrency:
@@ -284,7 +282,6 @@ jobs:
         asset:
           - busybox
           - coco-guest-components
-          - kernel-nvidia-gpu-modules
           - pause-image
     concurrency:
       group: ${{ github.workflow }}-${{ github.job }}-${{ github.event.pull_request.number || github.ref }}-amd64-${{ toJSON(matrix) }}
