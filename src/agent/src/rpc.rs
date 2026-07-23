@@ -2923,8 +2923,12 @@ async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
                     "--pbkdf-force-iterations",
                     "1000",
                     "--batch-mode",
-                    &node,
+                    // Read the passphrase from stdin via an explicit --key-file -.
+                    // A positional "-" is not accepted as a keyfile by cryptsetup
+                    // 2.x (luksOpen prompts instead), which was the real failure.
+                    "--key-file",
                     "-",
+                    &node,
                 ],
                 Some(dek.as_slice()),
             )
@@ -2936,7 +2940,14 @@ async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
         if !std::path::Path::new(&mapper_path).exists() {
             run_checked(
                 "cryptsetup",
-                &["luksOpen", "--disable-locks", &node, &mapper, "-"],
+                &[
+                    "luksOpen",
+                    "--disable-locks",
+                    "--key-file",
+                    "-",
+                    &node,
+                    &mapper,
+                ],
                 Some(dek.as_slice()),
             )
             .await
