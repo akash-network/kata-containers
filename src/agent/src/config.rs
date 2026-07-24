@@ -20,6 +20,7 @@ const DEV_MODE_FLAG: &str = "agent.devmode";
 const TRACE_MODE_OPTION: &str = "agent.trace";
 const LOG_LEVEL_OPTION: &str = "agent.log";
 const SERVER_ADDR_OPTION: &str = "agent.server_addr";
+const ATTESTER_VARIANT_OPTION: &str = "agent.attester_variant";
 const PASSFD_LISTENER_PORT: &str = "agent.passfd_listener_port";
 const HOTPLUG_TIMOUT_OPTION: &str = "agent.hotplug_timeout";
 const CDH_API_TIMOUT_OPTION: &str = "agent.cdh_api_timeout";
@@ -139,6 +140,9 @@ pub struct AgentConfig {
     pub log_vport: i32,
     pub container_pipe_size: i32,
     pub server_addr: String,
+    // Force a specific CoCo attester flavour ("default" = stock SNP/TDX attester,
+    // "nvidia" = GPU attester). Empty means honour NVRC's KATA_ATTESTER_VARIANT env.
+    pub attester_variant: String,
     pub passfd_listener_port: i32,
     pub cgroup_no_v1: String,
     pub unified_cgroup_hierarchy: bool,
@@ -174,6 +178,7 @@ pub struct AgentConfigBuilder {
     pub log_vport: Option<i32>,
     pub container_pipe_size: Option<i32>,
     pub server_addr: Option<String>,
+    pub attester_variant: Option<String>,
     pub passfd_listener_port: Option<i32>,
     pub unified_cgroup_hierarchy: Option<bool>,
     pub tracing: Option<bool>,
@@ -270,6 +275,7 @@ impl Default for AgentConfig {
             log_vport: 0,
             container_pipe_size: DEFAULT_CONTAINER_PIPE_SIZE,
             server_addr: format!("{VSOCK_ADDR}:{DEFAULT_AGENT_VSOCK_PORT}"),
+            attester_variant: String::from(""),
             passfd_listener_port: 0,
             cgroup_no_v1: String::from(""),
             unified_cgroup_hierarchy: false,
@@ -313,6 +319,7 @@ impl FromStr for AgentConfig {
         config_override!(agent_config_builder, agent_config, log_vport);
         config_override!(agent_config_builder, agent_config, container_pipe_size);
         config_override!(agent_config_builder, agent_config, server_addr);
+        config_override!(agent_config_builder, agent_config, attester_variant);
         config_override!(agent_config_builder, agent_config, passfd_listener_port);
         config_override!(agent_config_builder, agent_config, unified_cgroup_hierarchy);
         config_override!(agent_config_builder, agent_config, tracing);
@@ -453,6 +460,12 @@ impl AgentConfig {
                 param,
                 SERVER_ADDR_OPTION,
                 config.server_addr,
+                get_string_value
+            );
+            parse_cmdline_param!(
+                param,
+                ATTESTER_VARIANT_OPTION,
+                config.attester_variant,
                 get_string_value
             );
 

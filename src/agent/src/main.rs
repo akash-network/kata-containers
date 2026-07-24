@@ -535,10 +535,22 @@ fn build_substitution_ctx(
     // policy requires). Absent that signal we fall back to the stock attester.
     // Cross-component contract: the env var name and "nvidia" value are set by
     // NVRC (src/kata_agent.rs, src/gpu.rs); keep them in sync.
-    let attester_variant = env::var("KATA_ATTESTER_VARIANT")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| "default".to_string());
+    //
+    // The `agent.attester_variant` kernel cmdline option overrides NVRC's env
+    // signal, letting the host force a flavour per-pod. In particular the
+    // provider sets it to "default" so a GPU-CC guest runs the stock SNP/TDX
+    // attester and emits no GPU evidence, decoupling KBS resource release
+    // (e.g. the storage DEK) from GPU device attestation — required where the
+    // KBS's NVIDIA verifier cannot attest the installed GPU (e.g. Blackwell on
+    // the local verifier). Precedence: cmdline > NVRC env > stock "default".
+    let attester_variant = if !config.attester_variant.is_empty() {
+        config.attester_variant.clone()
+    } else {
+        env::var("KATA_ATTESTER_VARIANT")
+            .ok()
+            .filter(|v| !v.is_empty())
+            .unwrap_or_else(|| "default".to_string())
+    };
     ctx.insert("attester_variant".to_string(), attester_variant);
 
     Ok(ctx)

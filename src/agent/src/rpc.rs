@@ -309,6 +309,12 @@ impl AgentService {
             .await
             .map_err(|e| anyhow!("failed to handle sealed secrets: {}", e))?;
 
+        // Set up confidential persistent storage: dm-crypt each block volume
+        // with its CDH-provided key and bind it into the container.
+        cdh_handler_secure_volumes(&mut oci)
+            .await
+            .map_err(|e| anyhow!("failed to handle secure volumes: {:#}", e))?;
+
         let mut s = self.sandbox.lock().await;
         s.container_mounts.insert(cid.clone(), m);
 
@@ -2695,6 +2701,301 @@ async fn cdh_handler_sealed_secrets(oci: &mut Spec) -> Result<()> {
                 );
             }
         }
+    }
+
+    Ok(())
+}
+
+// ---- Confidential persistent storage ----
+//
+// The host marks each confidential persistent volume on the guest kernel
+// command line:
+//
+//     agent.secure_volumes=<devicePath>=<mountPath>=<keyResourceURI>[,...]
+//
+// `devicePath` is the raw block device attached to the container (e.g. a
+// block-mode volume), `keyResourceURI` is a Confidential Data Hub resource
+// holding the per-volume disk encryption key (DEK), and `mountPath` is where
+// the workload expects the decrypted filesystem. For each entry the agent
+// fetches the DEK via CDH (attestation gated, never seen by the host),
+// dm-crypts the device with a stable on-device LUKS2 header (format on first
+// use, open thereafter), makes an ext4 filesystem on first use, mounts it to a
+// staging path, and adds an OCI bind mount so the decrypted filesystem appears
+// at the requested mount path inside the container.
+const SECURE_VOLUMES_CMDLINE_KEY: &str = "agent.secure_volumes";
+const SECURE_VOLUMES_STAGING_DIR: &str = "/run/kata-secure-volumes";
+
+struct SecureVolume {
+    device: String,
+    mount: String,
+    key_uri: String,
+}
+
+fn parse_secure_volumes(cmdline: &str) -> Vec<SecureVolume> {
+    let prefix = format!("{}=", SECURE_VOLUMES_CMDLINE_KEY);
+    for token in cmdline.split_whitespace() {
+        if let Some(val) = token.strip_prefix(&prefix) {
+            return val
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .filter_map(|spec| {
+                    let parts: Vec<&str> = spec.splitn(3, '=').collect();
+                    if parts.len() == 3 {
+                        Some(SecureVolume {
+                            device: parts[0].to_string(),
+                            mount: parts[1].to_string(),
+                            key_uri: parts[2].to_string(),
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+        }
+    }
+    Vec::new()
+}
+
+// run_checked runs a command to completion, optionally writing `input` to its
+// stdin (used to pass the LUKS passphrase without a temporary file), and returns
+// an error if it exits non-zero.
+async fn run_checked(program: &str, args: &[&str], input: Option<&[u8]>) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+    // Keep the agent SIGCHLD handler from reaping this child before
+    // tokio::process observes it (mirrors block_handler's mkfs invocation).
+    let _locker = rustjail::container::WAIT_PID_LOCKER.lock().await;
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if input.is_some() {
+        cmd.stdin(std::process::Stdio::piped());
+    }
+    let mut child = cmd.spawn().with_context(|| format!("spawn {}", program))?;
+    if let Some(data) = input {
+        if let Some(mut stdin) = child.stdin.take() {
+            // Ignore write/close errors here (e.g. broken pipe when the child
+            // exits early). Reporting that would mask the child's real failure,
+            // which we surface from stderr below.
+            let _ = stdin.write_all(data).await;
+            let _ = stdin.shutdown().await;
+        }
+    }
+    let output = child.wait_with_output().await?;
+    if !output.status.success() {
+        return Err(anyhow!(
+            "{} {:?} failed: status={}, stderr={}",
+            program,
+            args,
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(())
+}
+
+async fn cmd_succeeds(program: &str, args: &[&str]) -> bool {
+    let _locker = rustjail::container::WAIT_PID_LOCKER.lock().await;
+    matches!(
+        tokio::process::Command::new(program).args(args).output().await,
+        Ok(o) if o.status.success()
+    )
+}
+
+fn make_block_node(path: &str, major: i64, minor: i64) -> Result<()> {
+    let _ = std::fs::remove_file(path);
+    nix::sys::stat::mknod(
+        path,
+        nix::sys::stat::SFlag::S_IFBLK,
+        nix::sys::stat::Mode::from_bits_truncate(0o600),
+        nix::sys::stat::makedev(major as u64, minor as u64),
+    )
+    .map_err(|e| anyhow!("mknod {} ({}:{}): {}", path, major, minor, e))?;
+    Ok(())
+}
+
+// ensure_dm_control makes sure the device-mapper control node exists so that
+// cryptsetup luksOpen can initialize device-mapper in a minimal guest /dev that
+// has no udev. The control node is the misc char device 10:236.
+fn ensure_dm_control() -> Result<()> {
+    let ctrl = "/dev/mapper/control";
+    if std::path::Path::new(ctrl).exists() {
+        return Ok(());
+    }
+    let _ = std::fs::create_dir_all("/dev/mapper");
+    nix::sys::stat::mknod(
+        ctrl,
+        nix::sys::stat::SFlag::S_IFCHR,
+        nix::sys::stat::Mode::from_bits_truncate(0o600),
+        nix::sys::stat::makedev(10, 236),
+    )
+    .map_err(|e| anyhow!("mknod {}: {}", ctrl, e))?;
+    Ok(())
+}
+
+async fn cdh_handler_secure_volumes(oci: &mut Spec) -> Result<()> {
+    if !confidential_data_hub::is_cdh_client_initialized() {
+        return Ok(());
+    }
+
+    let cmdline = tokio::fs::read_to_string("/proc/cmdline")
+        .await
+        .unwrap_or_default();
+    let volumes = parse_secure_volumes(&cmdline);
+    if volumes.is_empty() {
+        return Ok(());
+    }
+
+    let _ = tokio::fs::create_dir_all(SECURE_VOLUMES_STAGING_DIR).await;
+
+    for vol in volumes {
+        // Only handle volumes whose block device is present in THIS container's
+        // spec. The pod sandbox/pause container and peer containers do not have
+        // the device, so skip them rather than failing container creation.
+        let dev = oci
+            .linux()
+            .as_ref()
+            .and_then(|l| l.devices().as_ref())
+            .and_then(|devs| {
+                devs.iter()
+                    .find(|d| d.path().as_path().to_str() == Some(vol.device.as_str()))
+            });
+        let (major, minor) = match dev {
+            Some(d) => (d.major(), d.minor()),
+            None => continue,
+        };
+
+        // The block device is hot-plugged into the guest during container
+        // creation and may not be registered in the guest kernel yet at this
+        // point. Wait for it to appear before running cryptsetup against it.
+        let sysblk = format!("/sys/dev/block/{}:{}", major, minor);
+        let mut waited_ms = 0u64;
+        while !std::path::Path::new(&sysblk).exists() {
+            if waited_ms >= 20_000 {
+                return Err(anyhow!(
+                    "secure volume device {} ({}:{}) did not appear in the guest within 20s",
+                    vol.device,
+                    major,
+                    minor
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            waited_ms += 250;
+        }
+
+        // Fetch the per-lease DEK from KBS (attestation gated; host never sees it).
+        let dek = confidential_data_hub::get_cdh_resource(&vol.key_uri)
+            .await
+            .map_err(|e| anyhow!("fetch DEK {}: {}", vol.key_uri, e))?;
+
+        let tag = vol.device.trim_start_matches('/').replace(['/', ':'], "_");
+        // The device node must live on devtmpfs (/dev): the staging dir is under
+        // /run, which is a nodev tmpfs, so a device node created there is inert
+        // ("does not exist or access denied" from cryptsetup).
+        let node = format!("/dev/secvol_{}", tag);
+        let mapper = format!("secvol_{}", tag);
+        let mapper_path = format!("/dev/mapper/{}", mapper);
+        let staging = format!("{}/mnt_{}", SECURE_VOLUMES_STAGING_DIR, tag);
+
+        // cryptsetup luksOpen needs the device-mapper control node; create it if
+        // the minimal guest /dev lacks it (char device 10:236).
+        ensure_dm_control()?;
+        make_block_node(&node, major, minor)?;
+
+        // A fresh (never-formatted) device needs both a LUKS header and a new
+        // filesystem; an existing LUKS device already has both. Tying mkfs to the
+        // "fresh" decision (rather than blkid) avoids reformatting a populated
+        // volume across restart (data loss) and drops the blkid dependency.
+        let fresh = !cmd_succeeds("cryptsetup", &["isLuks", &node]).await;
+        if fresh {
+            info!(sl(), "secure volume: formatting LUKS2"; "device" => vol.device.as_str());
+            run_checked(
+                "cryptsetup",
+                &[
+                    "luksFormat",
+                    // The guest init namespace may lack a writable cryptsetup
+                    // lock dir (/run/cryptsetup); disable locking so cryptsetup
+                    // does not exit early trying to acquire it.
+                    "--disable-locks",
+                    "--type",
+                    "luks2",
+                    // pbkdf2 instead of the default argon2id: argon2id sizes
+                    // itself to available RAM and fails ("not enough memory to
+                    // open keyslot") inside a memory-constrained guest.
+                    "--pbkdf",
+                    "pbkdf2",
+                    "--pbkdf-force-iterations",
+                    "1000",
+                    "--batch-mode",
+                    // Read the passphrase from stdin via an explicit --key-file -.
+                    // A positional "-" is not accepted as a keyfile by cryptsetup
+                    // 2.x (luksOpen prompts instead), which was the real failure.
+                    "--key-file",
+                    "-",
+                    &node,
+                ],
+                Some(dek.as_slice()),
+            )
+            .await
+            .context("cryptsetup luksFormat")?;
+        }
+
+        // Open the mapper unless a prior (retried) create already opened it.
+        if !std::path::Path::new(&mapper_path).exists() {
+            run_checked(
+                "cryptsetup",
+                &[
+                    "luksOpen",
+                    "--disable-locks",
+                    "--key-file",
+                    "-",
+                    &node,
+                    &mapper,
+                ],
+                Some(dek.as_slice()),
+            )
+            .await
+            .context("cryptsetup luksOpen")?;
+        }
+
+        if fresh {
+            info!(sl(), "secure volume: creating ext4"; "device" => vol.device.as_str());
+            run_checked("mkfs.ext4", &["-F", &mapper_path], None)
+                .await
+                .context("mkfs.ext4")?;
+        }
+
+        let _ = tokio::fs::create_dir_all(&staging).await;
+        let already_mounted = tokio::fs::read_to_string("/proc/mounts")
+            .await
+            .map(|m| m.lines().any(|l| l.split(' ').nth(1) == Some(staging.as_str())))
+            .unwrap_or(false);
+        if !already_mounted {
+            // Mount via the syscall (nix) rather than the `mount` binary to avoid
+            // a PATH/tooling dependency inside the guest.
+            nix::mount::mount(
+                Some(mapper_path.as_str()),
+                staging.as_str(),
+                Some("ext4"),
+                nix::mount::MsFlags::empty(),
+                None::<&str>,
+            )
+            .context("mount decrypted device")?;
+        }
+
+        // Bind the decrypted filesystem into the container at the tenant path.
+        let mut m = oci::Mount::default();
+        m.set_source(Some(std::path::PathBuf::from(&staging)));
+        m.set_typ(Some("bind".to_string()));
+        m.set_destination(std::path::PathBuf::from(&vol.mount));
+        m.set_options(Some(vec!["rbind".to_string(), "rprivate".to_string()]));
+        match oci.mounts_mut().as_mut() {
+            Some(mounts) => mounts.push(m),
+            None => return Err(anyhow!("spec has no mounts to attach secure volume")),
+        }
+
+        info!(sl(), "secure volume ready";
+            "device" => vol.device.as_str(), "mount" => vol.mount.as_str());
     }
 
     Ok(())
