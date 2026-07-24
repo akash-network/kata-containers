@@ -309,11 +309,11 @@ impl AgentService {
             .await
             .map_err(|e| anyhow!("failed to handle sealed secrets: {}", e))?;
 
-        // Set up Akash confidential persistent storage: dm-crypt each block
-        // volume with its per-lease KBS key and bind it into the container.
-        cdh_handler_akash_secure_volumes(&mut oci)
+        // Set up confidential persistent storage: dm-crypt each block volume
+        // with its CDH-provided key and bind it into the container.
+        cdh_handler_secure_volumes(&mut oci)
             .await
-            .map_err(|e| anyhow!("failed to handle akash secure volumes: {:#}", e))?;
+            .map_err(|e| anyhow!("failed to handle secure volumes: {:#}", e))?;
 
         let mut s = self.sandbox.lock().await;
         s.container_mounts.insert(cid.clone(), m);
@@ -2706,32 +2706,33 @@ async fn cdh_handler_sealed_secrets(oci: &mut Spec) -> Result<()> {
     Ok(())
 }
 
-// ---- Akash confidential persistent storage ----
+// ---- Confidential persistent storage ----
 //
-// The provider marks each confidential persistent volume on the guest kernel
+// The host marks each confidential persistent volume on the guest kernel
 // command line:
 //
-//     agent.akash_secure_volumes=<devicePath>=<mountPath>=<keyResourceURI>[,...]
+//     agent.secure_volumes=<devicePath>=<mountPath>=<keyResourceURI>[,...]
 //
-// `devicePath` is the raw block device attached to the container (a Block-mode
-// PVC), `keyResourceURI` is a KBS resource holding the per-lease disk encryption
-// key (DEK), and `mountPath` is where the tenant expects the decrypted
-// filesystem. For each entry the agent fetches the DEK from KBS (attestation
-// gated, never seen by the host), dm-crypts the device with a stable on-device
-// LUKS2 header (format on first use, open thereafter), makes an ext4 filesystem
-// on first use, mounts it to a staging path, and adds an OCI bind mount so the
-// decrypted filesystem appears at the tenant's mount path inside the container.
-const AKASH_SECURE_VOLUMES_CMDLINE_KEY: &str = "agent.akash_secure_volumes";
-const AKASH_SECURE_STAGING_DIR: &str = "/run/akash-secure";
+// `devicePath` is the raw block device attached to the container (e.g. a
+// block-mode volume), `keyResourceURI` is a Confidential Data Hub resource
+// holding the per-volume disk encryption key (DEK), and `mountPath` is where
+// the workload expects the decrypted filesystem. For each entry the agent
+// fetches the DEK via CDH (attestation gated, never seen by the host),
+// dm-crypts the device with a stable on-device LUKS2 header (format on first
+// use, open thereafter), makes an ext4 filesystem on first use, mounts it to a
+// staging path, and adds an OCI bind mount so the decrypted filesystem appears
+// at the requested mount path inside the container.
+const SECURE_VOLUMES_CMDLINE_KEY: &str = "agent.secure_volumes";
+const SECURE_VOLUMES_STAGING_DIR: &str = "/run/kata-secure-volumes";
 
-struct AkashSecureVolume {
+struct SecureVolume {
     device: String,
     mount: String,
     key_uri: String,
 }
 
-fn parse_akash_secure_volumes(cmdline: &str) -> Vec<AkashSecureVolume> {
-    let prefix = format!("{}=", AKASH_SECURE_VOLUMES_CMDLINE_KEY);
+fn parse_secure_volumes(cmdline: &str) -> Vec<SecureVolume> {
+    let prefix = format!("{}=", SECURE_VOLUMES_CMDLINE_KEY);
     for token in cmdline.split_whitespace() {
         if let Some(val) = token.strip_prefix(&prefix) {
             return val
@@ -2740,7 +2741,7 @@ fn parse_akash_secure_volumes(cmdline: &str) -> Vec<AkashSecureVolume> {
                 .filter_map(|spec| {
                     let parts: Vec<&str> = spec.splitn(3, '=').collect();
                     if parts.len() == 3 {
-                        Some(AkashSecureVolume {
+                        Some(SecureVolume {
                             device: parts[0].to_string(),
                             mount: parts[1].to_string(),
                             key_uri: parts[2].to_string(),
@@ -2832,7 +2833,7 @@ fn ensure_dm_control() -> Result<()> {
     Ok(())
 }
 
-async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
+async fn cdh_handler_secure_volumes(oci: &mut Spec) -> Result<()> {
     if !confidential_data_hub::is_cdh_client_initialized() {
         return Ok(());
     }
@@ -2840,12 +2841,12 @@ async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
     let cmdline = tokio::fs::read_to_string("/proc/cmdline")
         .await
         .unwrap_or_default();
-    let volumes = parse_akash_secure_volumes(&cmdline);
+    let volumes = parse_secure_volumes(&cmdline);
     if volumes.is_empty() {
         return Ok(());
     }
 
-    let _ = tokio::fs::create_dir_all(AKASH_SECURE_STAGING_DIR).await;
+    let _ = tokio::fs::create_dir_all(SECURE_VOLUMES_STAGING_DIR).await;
 
     for vol in volumes {
         // Only handle volumes whose block device is present in THIS container's
@@ -2891,10 +2892,10 @@ async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
         // The device node must live on devtmpfs (/dev): the staging dir is under
         // /run, which is a nodev tmpfs, so a device node created there is inert
         // ("does not exist or access denied" from cryptsetup).
-        let node = format!("/dev/aksec_{}", tag);
-        let mapper = format!("akash_secure_{}", tag);
+        let node = format!("/dev/secvol_{}", tag);
+        let mapper = format!("secvol_{}", tag);
         let mapper_path = format!("/dev/mapper/{}", mapper);
-        let staging = format!("{}/mnt_{}", AKASH_SECURE_STAGING_DIR, tag);
+        let staging = format!("{}/mnt_{}", SECURE_VOLUMES_STAGING_DIR, tag);
 
         // cryptsetup luksOpen needs the device-mapper control node; create it if
         // the minimal guest /dev lacks it (char device 10:236).
@@ -2907,7 +2908,7 @@ async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
         // volume across restart (data loss) and drops the blkid dependency.
         let fresh = !cmd_succeeds("cryptsetup", &["isLuks", &node]).await;
         if fresh {
-            info!(sl(), "akash secure volume: formatting LUKS2"; "device" => vol.device.as_str());
+            info!(sl(), "secure volume: formatting LUKS2"; "device" => vol.device.as_str());
             run_checked(
                 "cryptsetup",
                 &[
@@ -2958,7 +2959,7 @@ async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
         }
 
         if fresh {
-            info!(sl(), "akash secure volume: creating ext4"; "device" => vol.device.as_str());
+            info!(sl(), "secure volume: creating ext4"; "device" => vol.device.as_str());
             run_checked("mkfs.ext4", &["-F", &mapper_path], None)
                 .await
                 .context("mkfs.ext4")?;
@@ -2993,7 +2994,7 @@ async fn cdh_handler_akash_secure_volumes(oci: &mut Spec) -> Result<()> {
             None => return Err(anyhow!("spec has no mounts to attach secure volume")),
         }
 
-        info!(sl(), "akash secure volume ready";
+        info!(sl(), "secure volume ready";
             "device" => vol.device.as_str(), "mount" => vol.mount.as_str());
     }
 
