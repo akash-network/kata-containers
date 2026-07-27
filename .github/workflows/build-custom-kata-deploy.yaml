@@ -3,7 +3,7 @@
 # Builds the amd64 kata-static assets (including the patched kata-agent from this
 # branch) on GitHub-hosted runners and publishes a kata-deploy image to GHCR:
 #
-#     ghcr.io/cloud-j-luna/kata-deploy:<tag>
+#     ghcr.io/akash-network/kata-deploy:<tag>
 #
 # It reuses kata's own reusable build/publish workflows, pointed at GHCR instead
 # of quay.io. The quay.io login in publish-kata-images.yaml is gated on
@@ -30,7 +30,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Image tag to publish to ghcr.io/cloud-j-luna/kata-deploy
+        description: Image tag to publish to ghcr.io/akash-network/kata-deploy
         required: true
         default: 3.32.0-initdata-auth
 
@@ -60,7 +60,7 @@ jobs:
     uses: ./.github/workflows/publish-kata-images.yaml
     with:
       registry: ghcr.io
-      repo: cloud-j-luna/kata-deploy
+      repo: akash-network/kata-deploy
       tag: ${{ inputs.tag }}
       arch: amd64
       push: "true"
