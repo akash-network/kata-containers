@@ -30,6 +30,7 @@ pub const INITDATA_PATH: &str = "/run/confidential-containers/initdata";
 const AA_CONFIG_KEY: &str = "aa.toml";
 const CDH_CONFIG_KEY: &str = "cdh.toml";
 const POLICY_KEY: &str = "policy.rego";
+const SECURE_VOLUMES_KEY: &str = "akash-secure-volumes.json";
 
 /// Initdata key for the container image registry authentication file.
 ///
@@ -49,6 +50,9 @@ pub const AA_CONFIG_PATH: &str = concatcp!(INITDATA_PATH, "/aa.toml");
 
 /// The path of CDH's config file
 pub const CDH_CONFIG_PATH: &str = concatcp!(INITDATA_PATH, "/cdh.toml");
+
+/// Path of the measured Akash confidential persistent-volume descriptor.
+pub const SECURE_VOLUMES_PATH: &str = concatcp!(INITDATA_PATH, "/akash-secure-volumes.json");
 
 /// Magic number of initdata device
 #[cfg(feature = "init-data")]
@@ -147,9 +151,8 @@ pub struct InitdataReturnValue {
 /// Missing keys are skipped. `policy.rego` is intentionally not written here: it
 /// is returned to the caller instead.
 ///
-/// The registry authentication file holds credentials, so it is created with
-/// owner-only (0600) permissions to avoid exposing them to other processes in
-/// the guest.
+/// Registry authentication and secure-volume descriptor files are created with
+/// owner-only (0600) permissions.
 async fn materialize_initdata_files(
     logger: &Logger,
     initdata: &InitData,
@@ -180,6 +183,17 @@ async fn materialize_initdata_files(
             .await
             .context("set registry auth file permissions failed")?;
         info!(logger, "write registry auth file from initdata");
+    }
+
+    if let Some(descriptor) = initdata.get_coco_data(SECURE_VOLUMES_KEY) {
+        let path = base_dir.join(SECURE_VOLUMES_KEY);
+        tokio::fs::write(&path, descriptor)
+            .await
+            .context("write secure-volume descriptor failed")?;
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .await
+            .context("set secure-volume descriptor permissions failed")?;
+        info!(logger, "write secure-volume descriptor from initdata");
     }
 
     Ok(())
@@ -289,6 +303,7 @@ mod tests {
         initdata.insert_data(AA_CONFIG_KEY, "aa-config");
         initdata.insert_data(CDH_CONFIG_KEY, "cdh-config");
         initdata.insert_data(AUTH_FILE_KEY, TEST_AUTH_JSON);
+        initdata.insert_data(SECURE_VOLUMES_KEY, r#"{"version":"1","volumes":[]}"#);
 
         materialize_initdata_files(&test_logger(), &initdata, dir.path())
             .await
@@ -312,6 +327,18 @@ mod tests {
                 .unwrap(),
             TEST_AUTH_JSON
         );
+        assert_eq!(
+            tokio::fs::read_to_string(dir.path().join(SECURE_VOLUMES_KEY))
+                .await
+                .unwrap(),
+            r#"{"version":"1","volumes":[]}"#
+        );
+        let secure_volume_mode = tokio::fs::metadata(dir.path().join(SECURE_VOLUMES_KEY))
+            .await
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(secure_volume_mode & 0o777, 0o600);
     }
 
     // Absent keys (including the new auth key) must not create files: this
@@ -332,6 +359,7 @@ mod tests {
             "auth file must not be created when absent from initdata"
         );
         assert!(!dir.path().join(AA_CONFIG_KEY).exists());
+        assert!(!dir.path().join(SECURE_VOLUMES_KEY).exists());
     }
 
     // An empty [data] map is a no-op and must not error.
@@ -347,5 +375,6 @@ mod tests {
         assert!(!dir.path().join(AUTH_FILE_KEY).exists());
         assert!(!dir.path().join(AA_CONFIG_KEY).exists());
         assert!(!dir.path().join(CDH_CONFIG_KEY).exists());
+        assert!(!dir.path().join(SECURE_VOLUMES_KEY).exists());
     }
 }
