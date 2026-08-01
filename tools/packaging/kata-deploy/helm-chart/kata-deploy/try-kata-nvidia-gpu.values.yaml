@@ -71,7 +71,8 @@ shims:
     enabled: true
     supportedArches:
       - amd64
-    allowedHypervisorAnnotations: []
+    allowedHypervisorAnnotations:
+      - cc_init_data
     containerd:
       snapshotter: "nydus"
       forceGuestPull: false
@@ -93,7 +94,8 @@ shims:
     enabled: true
     supportedArches:
       - amd64
-    allowedHypervisorAnnotations: []
+    allowedHypervisorAnnotations:
+      - cc_init_data
     containerd:
       snapshotter: "nydus"
       forceGuestPull: false
@@ -115,7 +117,8 @@ shims:
     enabled: true
     supportedArches:
       - amd64
-    allowedHypervisorAnnotations: []
+    allowedHypervisorAnnotations:
+      - cc_init_data
     containerd:
       snapshotter: "nydus"
       forceGuestPull: false
@@ -137,7 +140,8 @@ shims:
     enabled: true
     supportedArches:
       - amd64
-    allowedHypervisorAnnotations: []
+    allowedHypervisorAnnotations:
+      - cc_init_data
     containerd:
       snapshotter: "nydus"
       forceGuestPull: false
