@@ -2962,7 +2962,10 @@ async fn cdh_handler_secure_volumes(oci: &mut Spec) -> Result<()> {
         let _ = tokio::fs::create_dir_all(&staging).await;
         let already_mounted = tokio::fs::read_to_string("/proc/mounts")
             .await
-            .map(|m| m.lines().any(|l| l.split(' ').nth(1) == Some(staging.as_str())))
+            .map(|m| {
+                m.lines()
+                    .any(|l| l.split(' ').nth(1) == Some(staging.as_str()))
+            })
             .unwrap_or(false);
         if !already_mounted {
             // Mount via the syscall (nix) rather than the `mount` binary to avoid

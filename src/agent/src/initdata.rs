@@ -264,7 +264,10 @@ mod tests {
 
         let path = dir.path().join(AUTH_FILE_KEY);
         let content = tokio::fs::read_to_string(&path).await.unwrap();
-        assert_eq!(content, TEST_AUTH_JSON, "auth file content must match initdata");
+        assert_eq!(
+            content, TEST_AUTH_JSON,
+            "auth file content must match initdata"
+        );
 
         let mode = tokio::fs::metadata(&path)
             .await
