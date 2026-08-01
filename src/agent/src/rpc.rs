@@ -2647,7 +2647,9 @@ pub(crate) async fn cdh_secure_mount(
 }
 
 pub(crate) async fn cdh_handler_sealed_secrets(oci: &mut Spec) -> Result<()> {
-    if !confidential_data_hub::is_cdh_client_initialized() {
+    let cdh_initialized = confidential_data_hub::is_cdh_client_initialized();
+    require_cdh_for_sealed_environment(oci, cdh_initialized)?;
+    if !cdh_initialized {
         return Ok(());
     }
     let process = oci
@@ -2695,6 +2697,25 @@ pub(crate) async fn cdh_handler_sealed_secrets(oci: &mut Spec) -> Result<()> {
                 .await
                 .context("failed to process a sealed-secret mount")?;
         }
+    }
+
+    Ok(())
+}
+
+fn require_cdh_for_sealed_environment(oci: &Spec, cdh_initialized: bool) -> Result<()> {
+    let has_sealed_environment = oci
+        .process()
+        .as_ref()
+        .and_then(|process| process.env().as_ref())
+        .is_some_and(|envs| {
+            envs.iter()
+                .any(|env| confidential_data_hub::is_sealed_env(env))
+        });
+
+    if has_sealed_environment && !cdh_initialized {
+        return Err(anyhow!(
+            "sealed environment variable requires an initialized Confidential Data Hub"
+        ));
     }
 
     Ok(())
@@ -3093,6 +3114,32 @@ mod tests {
             }]
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn test_sealed_environment_requires_cdh() {
+        let spec_with_env = |env: &str| {
+            let mut spec = Spec::default();
+            let mut process = oci_spec::runtime::Process::default();
+            process.set_env(Some(vec![env.to_string()]));
+            spec.set_process(Some(process));
+            spec
+        };
+
+        assert!(require_cdh_for_sealed_environment(&spec_with_env("NORMAL=value"), false).is_ok());
+        assert!(
+            require_cdh_for_sealed_environment(&spec_with_env("sealed.NAME=value"), false).is_ok()
+        );
+        assert!(require_cdh_for_sealed_environment(
+            &spec_with_env("SECRET=sealed.header.payload.signature"),
+            false
+        )
+        .is_err());
+        assert!(require_cdh_for_sealed_environment(
+            &spec_with_env("SECRET=sealed.header.payload.signature"),
+            true
+        )
+        .is_ok());
     }
 
     #[test]

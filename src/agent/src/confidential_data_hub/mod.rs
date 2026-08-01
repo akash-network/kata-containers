@@ -159,13 +159,18 @@ pub fn is_cdh_client_initialized() -> bool {
     CDH_CLIENT.get().is_some() // Returns true if CDH_CLIENT is initialized, false otherwise
 }
 
+pub(crate) fn is_sealed_env(env: &str) -> bool {
+    env.split_once('=')
+        .is_some_and(|(_, value)| value.starts_with(SEALED_SECRET_PREFIX))
+}
+
 pub async fn unseal_env(env: &str) -> Result<String> {
     let cdh_client = CDH_CLIENT
         .get()
         .expect("Confidential Data Hub not initialized");
 
-    if let Some((key, value)) = env.split_once('=') {
-        if value.starts_with(SEALED_SECRET_PREFIX) {
+    if is_sealed_env(env) {
+        if let Some((key, value)) = env.split_once('=') {
             let unsealed_value = cdh_client.unseal_secret_async(value).await?;
             let unsealed_env = format!("{}={}", key, std::str::from_utf8(&unsealed_value)?);
 
