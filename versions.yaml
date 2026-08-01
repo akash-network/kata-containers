@@ -272,7 +272,7 @@ externals:
   coco-guest-components:
     description: "Provides attested key unwrapping for image decryption"
     url: "https://github.com/akash-network/guest-components/"
-    version: "b709c846493e1365b2a43e7426063a1a2ab2e9d3"
+    version: "c596d7ab397994bca0a6cc574acd36a09dada3c6"
     toolchain: "1.90.0"
 
   coco-trustee:
