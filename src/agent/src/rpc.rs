@@ -2646,7 +2646,7 @@ pub(crate) async fn cdh_secure_mount(
     Ok(())
 }
 
-async fn cdh_handler_sealed_secrets(oci: &mut Spec) -> Result<()> {
+pub(crate) async fn cdh_handler_sealed_secrets(oci: &mut Spec) -> Result<()> {
     if !confidential_data_hub::is_cdh_client_initialized() {
         return Ok(());
     }
@@ -2656,12 +2656,9 @@ async fn cdh_handler_sealed_secrets(oci: &mut Spec) -> Result<()> {
         .ok_or_else(|| anyhow!("Spec didn't contain process field"))?;
     if let Some(envs) = process.env_mut().as_mut() {
         for env in envs.iter_mut() {
-            match confidential_data_hub::unseal_env(env).await {
-                Ok(unsealed_env) => *env = unsealed_env.to_string(),
-                Err(e) => {
-                    warn!(sl(), "Failed to unseal secret: {}", e)
-                }
-            }
+            *env = confidential_data_hub::unseal_env(env)
+                .await
+                .context("failed to process a sealed environment variable")?;
         }
     }
 
@@ -2694,12 +2691,9 @@ async fn cdh_handler_sealed_secrets(oci: &mut Spec) -> Result<()> {
             // But currently there is no quick way to determine which volume-mount is referring
             // to a sealed secret without reading the file.
             // And relying on file naming heuristic is inflexible. So we are going with this approach.
-            if let Err(e) = confidential_data_hub::unseal_file(source_path).await {
-                warn!(
-                    sl(),
-                    "Failed to unseal file: {:?}, Error: {:?}", source_path, e
-                );
-            }
+            confidential_data_hub::unseal_file(source_path)
+                .await
+                .context("failed to process a sealed-secret mount")?;
         }
     }
 
