@@ -647,6 +647,40 @@ func TestSandboxAttachDevicesVFIO(t *testing.T) {
 	assert.Nil(t, err, "Error while detaching devices %s", err)
 }
 
+func TestColdPlugPreservesTwoVFIODevices(t *testing.T) {
+	devicePaths := []string{
+		"/dev/vfio/devices/vfio5",
+		"/dev/vfio/devices/vfio6",
+	}
+	deviceInfos := make([]config.DeviceInfo, 0, len(devicePaths))
+	for _, path := range devicePaths {
+		deviceInfos = append(deviceInfos, config.DeviceInfo{
+			HostPath:      path,
+			ContainerPath: path,
+			DevType:       "c",
+		})
+	}
+
+	sandboxConfig := &SandboxConfig{
+		HypervisorConfig: HypervisorConfig{
+			ColdPlugVFIO: config.RootPort,
+			HotPlugVFIO:  config.NoPort,
+		},
+		Containers: []ContainerConfig{{DeviceInfos: deviceInfos}},
+	}
+	sandbox := &Sandbox{}
+
+	coldPlug, err := sandbox.coldOrHotPlugVFIO(sandboxConfig)
+	assert.NoError(t, err)
+	assert.True(t, coldPlug)
+	assert.Len(t, sandboxConfig.HypervisorConfig.VFIODevices, 2)
+	for i, device := range sandboxConfig.HypervisorConfig.VFIODevices {
+		assert.Equal(t, devicePaths[i], device.ContainerPath)
+		assert.True(t, device.ColdPlug)
+		assert.Equal(t, config.RootPort, device.Port)
+	}
+}
+
 var assetContent = []byte("FakeAsset fake asset FAKE ASSET")
 var assetContentHash = "92549f8d2018a95a294d28a65e795ed7d1a9d150009a28cea108ae10101178676f04ab82a6950d0099e4924f9c5e41dcba8ece56b75fc8b4e0a7492cb2a8c880"
 var assetContentWrongHash = "92549f8d2018a95a294d28a65e795ed7d1a9d150009a28cea108ae10101178676f04ab82a6950d0099e4924f9c5e41dcba8ece56b75fc8b4e0a7492cb2a8c881"
