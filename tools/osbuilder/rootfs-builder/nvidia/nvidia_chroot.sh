@@ -70,10 +70,10 @@ install_userspace_components() {
 
 	# Needed for confidential-data-hub and NVAT runtime dependencies
 	eval "${APT_INSTALL}" cryptsetup-bin dmsetup         \
-		libargon2-1 e2fsprogs libxml2
+		libargon2-1 e2fsprogs libxml2 util-linux
 
 	apt-mark hold cryptsetup-bin dmsetup libargon2-1     \
-		e2fsprogs libxml2
+		e2fsprogs libxml2 util-linux
 
 	# NVRC loads the NVIDIA driver modules from the gpu extension's self-contained
 	# module tree via `modprobe --dirname <extension>`, a kmod feature the base

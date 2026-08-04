@@ -363,7 +363,7 @@ copy_cdh_runtime_deps() {
 	cp -a "${stage_one}/${libdir}"/libm.so.6*              "${libdir}/."
 	cp -a "${stage_one}/${libdir}"/libc.so.6*              "${libdir}/."
 
-	# Shared libraries required by the cryptsetup, mkfs.ext4, and dd binaries
+	# Shared libraries required by the cryptsetup, blkid, mkfs.ext4, and dd binaries
 	# used by CDH secure_mount.
 	#
 	# cryptsetup direct dependencies
@@ -384,9 +384,10 @@ copy_cdh_runtime_deps() {
 
 	copy_mkfs_ext4_runtime_deps
 
-	# cryptsetup and dd are used by CDH secure_mount.
+	# cryptsetup, blkid, and dd are used by CDH secure_mount.
 	mkdir -p sbin bin
 	cp -a "${stage_one}/sbin/cryptsetup" sbin/.
+	cp -a "${stage_one}/usr/sbin/blkid" sbin/.
 	cp -a "${stage_one}/usr/bin/dd" bin/.
 }
 

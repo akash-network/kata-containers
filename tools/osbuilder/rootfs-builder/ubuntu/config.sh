@@ -14,12 +14,14 @@ OS_VERSION=${OS_VERSION:-""}
 PACKAGES="chrony iptables dbus"
 # shellcheck disable=SC2154
 [[ "${AGENT_INIT}" = no ]] && PACKAGES+=" init"
-# cryptsetup-bin and e2fsprogs are installed unconditionally:
+# cryptsetup-bin, e2fsprogs, and util-linux are installed unconditionally:
 #  - cryptsetup-bin is required by CDH's secure storage feature (encrypted
 #    volumes) in confidential guests.
 #  - e2fsprogs (mke2fs/mkfs.ext4) is required both by CDH secure storage and by
 #    the plain ephemeral storage feature, which is not confidential-only.
-PACKAGES+=" cryptsetup-bin e2fsprogs"
+#  - util-linux provides blkid, which CDH uses to distinguish a conclusively
+#    blank mapper from an existing or ambiguous filesystem before formatting.
+PACKAGES+=" cryptsetup-bin e2fsprogs util-linux"
 # shellcheck disable=SC2154
 [[ "${SECCOMP}" = yes ]] && PACKAGES+=" libseccomp2"
 [[ "$(uname -m)" = "s390x" ]] && PACKAGES+=" libcurl4 libnghttp2-14"
