@@ -521,7 +521,9 @@ shims:
     enabled: ~
     supportedArches:
       - amd64
-    allowedHypervisorAnnotations: []
+    # Per-workload init data is included in the confidential guest measurement.
+    allowedHypervisorAnnotations:
+      - cc_init_data
     containerd:
       snapshotter: "nydus"
       forceGuestPull: false
@@ -543,7 +545,8 @@ shims:
     enabled: ~
     supportedArches:
       - amd64
-    allowedHypervisorAnnotations: []
+    allowedHypervisorAnnotations:
+      - cc_init_data
     containerd:
       snapshotter: "nydus"
       forceGuestPull: false
@@ -561,7 +564,9 @@ shims:
     enabled: ~
     supportedArches:
       - amd64
-    allowedHypervisorAnnotations: []
+    # Per-workload init data is included in the confidential guest measurement.
+    allowedHypervisorAnnotations:
+      - cc_init_data
     containerd:
       snapshotter: "nydus"
       forceGuestPull: false
@@ -583,7 +588,8 @@ shims:
     enabled: ~
     supportedArches:
       - amd64
-    allowedHypervisorAnnotations: []
+    allowedHypervisorAnnotations:
+      - cc_init_data
     containerd:
       snapshotter: "nydus"
       forceGuestPull: false

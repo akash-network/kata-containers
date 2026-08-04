@@ -34,3 +34,12 @@ func TestKubeletPodResourceSocketAvailable(t *testing.T) {
 
 	assert.True(t, kubeletPodResourceSocketAvailable(sockPath))
 }
+
+func TestFormatCDIDevIDsPreservesTwoPGPUs(t *testing.T) {
+	deviceIDs := []string{"GPU-blackwell-0", "GPU-blackwell-1"}
+
+	assert.Equal(t, []string{
+		"nvidia.com/pgpu=GPU-blackwell-0",
+		"nvidia.com/pgpu=GPU-blackwell-1",
+	}, formatCDIDevIDs("nvidia.com/pgpu", deviceIDs))
+}

@@ -159,13 +159,18 @@ pub fn is_cdh_client_initialized() -> bool {
     CDH_CLIENT.get().is_some() // Returns true if CDH_CLIENT is initialized, false otherwise
 }
 
+pub(crate) fn is_sealed_env(env: &str) -> bool {
+    env.split_once('=')
+        .is_some_and(|(_, value)| value.starts_with(SEALED_SECRET_PREFIX))
+}
+
 pub async fn unseal_env(env: &str) -> Result<String> {
     let cdh_client = CDH_CLIENT
         .get()
         .expect("Confidential Data Hub not initialized");
 
-    if let Some((key, value)) = env.split_once('=') {
-        if value.starts_with(SEALED_SECRET_PREFIX) {
+    if is_sealed_env(env) {
+        if let Some((key, value)) = env.split_once('=') {
             let unsealed_value = cdh_client.unseal_secret_async(value).await?;
             let unsealed_env = format!("{}={}", key, std::str::from_utf8(&unsealed_value)?);
 
@@ -308,11 +313,15 @@ mod tests {
     use async_trait::async_trait;
     use std::fs::File;
     use std::io::{Read, Write};
-    use std::sync::Arc;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
     use tempfile::{tempdir, NamedTempFile};
-    use test_utils::skip_if_not_root;
     use tokio::signal::unix::{signal, SignalKind};
-    struct TestService;
+    struct TestService {
+        fail_unseal: Arc<AtomicBool>,
+    }
 
     #[async_trait]
     impl confidential_data_hub_ttrpc_async::SealedSecretService for TestService {
@@ -321,6 +330,13 @@ mod tests {
             _ctx: &::ttrpc::asynchronous::TtrpcContext,
             _req: confidential_data_hub::UnsealSecretInput,
         ) -> ttrpc::error::Result<confidential_data_hub::UnsealSecretOutput> {
+            if self.fail_unseal.load(Ordering::SeqCst) {
+                return Err(ttrpc::Error::RpcStatus(ttrpc::get_status(
+                    ttrpc::Code::INTERNAL,
+                    "injected unseal failure".to_string(),
+                )));
+            }
+
             let mut output = confidential_data_hub::UnsealSecretOutput::new();
             output.set_plaintext("unsealed".into());
             Ok(output)
@@ -351,9 +367,9 @@ mod tests {
         Ok(())
     }
 
-    fn start_ttrpc_server(cdh_socket_uri: String) {
+    fn start_ttrpc_server(cdh_socket_uri: String, fail_unseal: Arc<AtomicBool>) {
         tokio::spawn(async move {
-            let ss = Box::new(TestService {});
+            let ss = Box::new(TestService { fail_unseal });
             let ss = Arc::new(*ss);
             let ss_service = confidential_data_hub_ttrpc_async::create_sealed_secret_service(ss);
 
@@ -377,7 +393,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_sealed_secret() {
-        skip_if_not_root!();
         let test_dir = tempdir().expect("failed to create tmpdir");
         let test_dir_path = test_dir.path();
         let cdh_sock_uri = &format!(
@@ -385,9 +400,10 @@ mod tests {
             test_dir_path.join("cdh.sock").to_str().unwrap()
         );
 
+        let fail_unseal = Arc::new(AtomicBool::new(false));
         let rt = tokio::runtime::Runtime::new().unwrap();
         let _guard = rt.enter();
-        start_ttrpc_server(cdh_sock_uri.to_string());
+        start_ttrpc_server(cdh_sock_uri.to_string(), fail_unseal.clone());
         std::thread::sleep(std::time::Duration::from_secs(2));
         init_cdh_client(cdh_sock_uri).await.unwrap();
 
@@ -427,6 +443,60 @@ mod tests {
         normal_file.read_to_string(&mut contents).unwrap();
         assert_eq!(contents, String::from("testdata"));
         fs::remove_file(normal_filename).unwrap();
+
+        // The container-level handler leaves ordinary environment values alone.
+        let mut normal_spec = oci_spec::runtime::Spec::default();
+        let mut normal_process = oci_spec::runtime::Process::default();
+        normal_process.set_env(Some(vec![
+            "NORMAL=value".to_string(),
+            "SECRET=sealed.testdata".to_string(),
+        ]));
+        normal_spec.set_process(Some(normal_process));
+        normal_spec.set_mounts(Some(Vec::new()));
+        crate::rpc::cdh_handler_sealed_secrets(&mut normal_spec)
+            .await
+            .unwrap();
+        assert_eq!(
+            normal_spec.process().as_ref().unwrap().env(),
+            &Some(vec![
+                "NORMAL=value".to_string(),
+                "SECRET=unsealed".to_string(),
+            ])
+        );
+
+        // A declared sealed environment secret must not reach container creation
+        // when CDH cannot unseal it.
+        fail_unseal.store(true, Ordering::SeqCst);
+        let mut failing_env_spec = oci_spec::runtime::Spec::default();
+        let mut failing_env_process = oci_spec::runtime::Process::default();
+        failing_env_process.set_env(Some(vec!["SECRET=sealed.testdata".to_string()]));
+        failing_env_spec.set_process(Some(failing_env_process));
+        failing_env_spec.set_mounts(Some(Vec::new()));
+        assert!(
+            crate::rpc::cdh_handler_sealed_secrets(&mut failing_env_spec)
+                .await
+                .is_err(),
+            "sealed environment unseal failure must abort container setup"
+        );
+
+        // Candidate secret mounts must also fail closed. A missing source gives a
+        // deterministic unseal_file error without requiring a privileged mount.
+        let mut failing_mount_spec = oci_spec::runtime::Spec::default();
+        let mut failing_mount_process = oci_spec::runtime::Process::default();
+        failing_mount_process.set_env(Some(Vec::new()));
+        failing_mount_spec.set_process(Some(failing_mount_process));
+        let mut secret_mount = oci_spec::runtime::Mount::default();
+        secret_mount.set_source(Some(
+            "/run/kata-containers/shared/containers/missing-sealed-secret".into(),
+        ));
+        secret_mount.set_destination("/run/secrets/example".into());
+        failing_mount_spec.set_mounts(Some(vec![secret_mount]));
+        assert!(
+            crate::rpc::cdh_handler_sealed_secrets(&mut failing_mount_spec)
+                .await
+                .is_err(),
+            "sealed mount unseal failure must abort container setup"
+        );
 
         rt.shutdown_background();
         std::thread::sleep(std::time::Duration::from_secs(2));
