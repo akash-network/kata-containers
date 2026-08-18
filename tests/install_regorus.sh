@@ -63,16 +63,18 @@ install_regorus_cargo()
     fi
 
     if ! echo "${ARTEFACT_REGISTRY_PASSWORD}" | oras login "${ARTEFACT_REGISTRY:-ghcr.io}" -u "${ARTEFACT_REGISTRY_USERNAME}" --password-stdin; then
-        warn "Failed to login to oras registry"
-        return 1
+        warn "Failed to login to oras registry. Skipping caching of regorus binary."
+        return 0
     fi
 
     local image
     image="${ARTEFACT_REGISTRY:-ghcr.io}/${ARTEFACT_REPOSITORY:-kata-containers/kata-containers}/cached-artefacts/regorus:${version}"
 
     if ! (cd "${HOME}/.cargo/bin/" && oras push "${image}" --no-tty regorus); then
-        warn "Failed to push regorus binary to oras cache"
-        return 1
+        # Pull requests from forks receive a read-only package token. The
+        # binary is already installed, so a cache write must not fail the job.
+        warn "Failed to push regorus binary to oras cache. Continuing without caching."
+        return 0
     fi
     info "Successfully pushed regorus binary to oras cache as ${image}"
 }
