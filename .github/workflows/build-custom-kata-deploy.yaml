@@ -60,7 +60,9 @@ jobs:
     needs: lock
     permissions:
       contents: read # The reusable workflow checks out this revision.
-      packages: read # Static builds may reuse public artifacts cached in GHCR.
+      packages: write # Required by the reusable static-build workflow.
+      id-token: write # Required by the reusable static-build workflow.
+      attestations: write # Required by the reusable static-build workflow.
     uses: ./.github/workflows/build-kata-static-tarball-amd64.yaml
     with:
       # Upload assets as workflow artifacts only; do not push to a registry
