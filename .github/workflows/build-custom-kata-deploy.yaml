@@ -185,7 +185,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Verify embedded guest-components artifact
+      - name: Verify embedded guest-components lock and confidential runtime
         id: guest
         env:
           DIGEST: ${{ needs.publish.outputs.digest }}
@@ -208,8 +208,8 @@ jobs:
             "$container:/opt/kata-artifacts/versions.yaml" \
             "$extract/versions.yaml"
           docker cp \
-            "$container:/opt/kata-artifacts/tarballs/kata-static-coco-guest-components.tar.zst" \
-            "$extract/guest-components.tar.zst"
+            "$container:/opt/kata-artifacts/tarballs/kata-static-rootfs-image-nvidia-gpu-confidential.tar.zst" \
+            "$extract/confidential-runtime.tar.zst"
           embedded_revision=$(awk '
             $1 == "coco-guest-components:" { component = 1; next }
             component && $1 == "version:" {
@@ -234,9 +234,9 @@ jobs:
             printf 'kata-deploy image contains the wrong guest-components toolchain\n' >&2
             exit 1
           fi
-          archive_sha256=$(sha256sum "$extract/guest-components.tar.zst" | awk '{ print $1 }')
+          archive_sha256=$(sha256sum "$extract/confidential-runtime.tar.zst" | awk '{ print $1 }')
           if [[ ! $archive_sha256 =~ ^[0-9a-f]{64}$ ]]; then
-            printf 'guest-components tarball did not return a SHA-256 digest\n' >&2
+            printf 'confidential runtime tarball did not return a SHA-256 digest\n' >&2
             exit 1
           fi
           printf 'archive-sha256=%s\n' "$archive_sha256" >>"$GITHUB_OUTPUT"
@@ -244,7 +244,7 @@ jobs:
       - name: Record immutable output
         env:
           DIGEST: ${{ needs.publish.outputs.digest }}
-          GUEST_COMPONENTS_ARCHIVE_SHA256: ${{ steps.guest.outputs.archive-sha256 }}
+          CONFIDENTIAL_RUNTIME_ARCHIVE_SHA256: ${{ steps.guest.outputs.archive-sha256 }}
           IMAGE: ${{ needs.publish.outputs.image }}
           GUEST_COMPONENTS_REVISION: ${{ needs.lock.outputs.guest-components-revision }}
           GUEST_COMPONENTS_TOOLCHAIN: ${{ needs.lock.outputs.guest-components-toolchain }}
@@ -258,7 +258,7 @@ jobs:
             printf -- '- Source: `%s`\n' "$GITHUB_SHA"
             printf -- '- guest-components: `%s`\n' "$GUEST_COMPONENTS_REVISION"
             printf -- '- guest-components Rust toolchain: `%s`\n' "$GUEST_COMPONENTS_TOOLCHAIN"
-            printf -- '- guest-components tarball SHA-256: `%s`\n' \
-              "$GUEST_COMPONENTS_ARCHIVE_SHA256"
+            printf -- '- confidential NVIDIA runtime tarball SHA-256: `%s`\n' \
+              "$CONFIDENTIAL_RUNTIME_ARCHIVE_SHA256"
             printf '\nNo release, Git tag, or mutable image tag was created.\n'
           } >>"$GITHUB_STEP_SUMMARY"
